@@ -1,0 +1,95 @@
+' Internal Windows backend for FileMetadata.bui (x64/ARM64).
+' Imported only by FileMetadata.bui under #If TargetWindows; not public API.
+' Every function returns 0 or the raw GetLastError code. Directory entries are
+' inspected without opening the file: no content, stream or link target is read.
+' Windows has no file-tag store in this package; nothing here writes.
+
+#If TargetWindows Then
+Private Declare Function FMWFullPath Lib "kernel32" Alias "GetFullPathNameW" (input As Ptr, capacity As UInt32, output As Ptr, filePart As Ptr) As UInt32
+Private Declare Function FMWAttributes Lib "kernel32" Alias "GetFileAttributesW" (entryPath As Ptr) As UInt32
+' FindFirstFileW, not FindFirstFileExW: Buoy 0.72 cross-links lack the Ex import.
+Private Declare Function FMWFindFirst Lib "kernel32" Alias "FindFirstFileW" (entryPath As Ptr, data As Ptr) As Ptr
+Private Declare Function FMWFindClose Lib "kernel32" Alias "FindClose" (handle As Ptr) As Int32
+Private Declare Function FMWLastError Lib "kernel32" Alias "GetLastError" () As UInt32
+
+Private Function FMWError() As Integer
+    Dim code As Integer = FMWLastError()
+    If code = 0 Then Return -1
+    Return code
+End Function
+
+Private Function FMWZeroed(count As Integer) As Bytes
+    Dim buffer As New Bytes(count)
+    For i As Integer = 1 To count
+        buffer.Append(0)
+    Next
+    Return buffer
+End Function
+
+' NUL-terminated UTF-16LE. 32767 units is the longest Windows path.
+Private Function FMWWide(entryPath As String) As Bytes
+    Dim encoded As Bytes = entryPath.AsUTF16LE()
+    If encoded.Count > 65532 Then Throw New InvalidArgumentException("Path exceeds 32766 UTF-16 code units")
+    encoded.Append(0)
+    encoded.Append(0)
+    Return encoded
+End Function
+
+' Strict UTF-16LE decode of units [first, first + count); an unpaired
+' surrogate throws EncodingException, which the facade classifies.
+Private Function FMWText(buffer As Bytes, first As Integer, count As Integer) As String
+    Dim slice As New Bytes(count * 2)
+    For i As Integer = first * 2 To (first + count) * 2 - 1
+        slice.Append(buffer.Item(i))
+    Next
+    Return String.FromUTF16LE(slice)
+End Function
+
+''' Lexical GetFullPathNameW: resolves "." and ".." without touching the disk.
+''' Read-only.
+Public Function FileMetadataWindowsFullPath(entryPath As String, ByRef fullPath As String) As Integer
+    Dim wide As Bytes = FMWWide(entryPath)
+    Dim capacity As Integer = 260
+    Do
+        Dim buffer As Bytes = FMWZeroed(capacity * 2)
+        Dim count As Integer = FMWFullPath(wide.DataPtr(), capacity, buffer.DataPtr(), Nil)
+        If count = 0 Then Return FMWError()
+        If count < capacity Then
+            fullPath = FMWText(buffer, 0, count)
+            Return 0
+        End If
+        If count > 32768 Then Return 206
+        capacity = count + 1
+    Loop
+End Function
+
+''' FindFirstFileW on a non-root path: the on-disk entry
+''' name and attributes in one directory read. A reparse point (symbolic link
+''' or junction) reports its own entry, never its target. Read-only.
+Public Function FileMetadataWindowsEntry(fullPath As String, ByRef entryName As String, ByRef attributes As Integer) As Integer
+    Dim wide As Bytes = FMWWide(fullPath)
+    ' WIN32_FIND_DATAW: 592 bytes; dwFileAttributes at 0, cFileName[260] at 44.
+    Dim data As Bytes = FMWZeroed(592)
+    Dim handle As Ptr = FMWFindFirst(wide.DataPtr(), data.DataPtr())
+    If handle = CType(-1, Ptr) Then Return FMWError()
+    FMWFindClose(handle)
+    attributes = data.Item(0) + data.Item(1) * 256 + data.Item(2) * 65536 + data.Item(3) * 16777216
+    Dim units As Integer = 0
+    While units < 260 And (data.Item(44 + units * 2) <> 0 Or data.Item(45 + units * 2) <> 0)
+        units += 1
+    Wend
+    If units = 0 Or units = 260 Then Return 123
+    entryName = FMWText(data, 22, units)
+    Return 0
+End Function
+
+''' GetFileAttributesW, used for volume and share roots, which have no
+''' directory entry for FindFirstFileExW. Read-only.
+Public Function FileMetadataWindowsAttributes(fullPath As String, ByRef attributes As Integer) As Integer
+    Dim wide As Bytes = FMWWide(fullPath)
+    Dim value As UInt32 = FMWAttributes(wide.DataPtr())
+    If value = 4294967295 Then Return FMWError()
+    attributes = value
+    Return 0
+End Function
+#End If

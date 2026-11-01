@@ -1,0 +1,427 @@
+#If TargetLinux Then
+Import FileMetadataLinuxBackend As FileMetadataBackend
+#ElseIf TargetWindows Then
+Import FileMetadataWindowsBackend As FileMetadataBackend
+#End If
+
+''' Frozen: True only where the original macOS Finder/NSURL backend runs.
+''' Portable code gates on FileMetadataSnapshotSupported and FileTagsSupported.
+''' Compile-time only; read-only.
+Public Function FileMetadataSupported() As Boolean
+    #If TargetMac Then
+        Return True
+    #Else
+        Return False
+    #End If
+End Function
+
+''' True when this compile target can construct FileMetadataSnapshot: macOS
+''' (NSURL resource values), Linux (path name plus user.xdg.tags) and Windows
+''' (FindFirstFileW). Compile-time only: it touches no file. Read-only.
+''' Check the snapshot's Has* properties before trusting a platform field.
+Public Function FileMetadataSnapshotSupported() As Boolean
+    #If TargetMac Or TargetLinux Or TargetWindows Then
+        Return True
+    #Else
+        Return False
+    #End If
+End Function
+
+''' True when this compile target implements file tags: macOS Finder tags and
+''' the Linux user.xdg.tags extended attribute. False on Windows, where
+''' SetFileTags throws UnsupportedOperationException. Compile-time only; a
+''' Linux filesystem without user extended attributes still fails per file.
+''' Read-only.
+Public Function FileTagsSupported() As Boolean
+    #If TargetMac Or TargetLinux Then
+        Return True
+    #Else
+        Return False
+    #End If
+End Function
+
+#If TargetMac Then
+    Private Declare Function NativeClass Lib "objc" Alias "objc_getClass" (name As String) As Ptr
+    Private Declare Function Allocate Lib "Foundation" Selector "alloc" (cls As Ptr) As Ptr
+    Private Declare Function InitObject Lib "Foundation" Selector "init" (object As Ptr) As Ptr
+    Private Declare Function NewPool Lib "Foundation" Selector "new" (cls As Ptr) As Ptr
+    Private Declare Sub DrainPool Lib "Foundation" Selector "drain" (pool As Ptr)
+    Private Declare Sub ReleaseObject Lib "CoreFoundation" Alias "CFRelease" (value As Ptr)
+    Private Function NativeText(value As Ptr) As String
+        If value = Nil Then Return ""
+        Return CType(CType(value, CFStringRef), String)
+    End Function
+    Private Declare Function ArrayCount Lib "Foundation" Selector "count" (nativeArray As Ptr) As Integer
+    Private Declare Function ArrayItem Lib "Foundation" Selector "objectAtIndex:" (nativeArray As Ptr, index As Integer) As Ptr
+    Private Function CopyStrings(nativeArray As Ptr) As Array Of String
+        Dim outputValue As Array Of String = []
+        If nativeArray = Nil Then Return outputValue
+        For i As Integer = 0 To ArrayCount(nativeArray) - 1
+            Array.Append(outputValue, NativeText(ArrayItem(nativeArray, i)))
+        Next
+        Return outputValue
+    End Function
+    Private Declare Function FindSymbol Lib "c" Alias "dlsym" (handle As Ptr, name As String) As Ptr
+    Private Declare Function CopyPointer Lib "c" Alias "memcpy" (ByRef output As Ptr, source As Ptr, count As Integer) As Ptr
+    Private Declare Function FileURL Lib "Foundation" Selector "initFileURLWithPath:" (url As Ptr, filePath As Ptr) As Ptr
+    Private Declare Function ReadResource Lib "Foundation" Selector "getResourceValue:forKey:error:" (url As Ptr, ByRef value As Ptr, key As Ptr, ByRef errorObject As Ptr) As UInt8
+    Private Declare Function SetResource Lib "Foundation" Selector "setResourceValue:forKey:error:" (url As Ptr, value As Ptr, key As Ptr, ByRef errorObject As Ptr) As UInt8
+    Private Declare Function NumberFlag Lib "Foundation" Selector "boolValue" (value As Ptr) As UInt8
+    Private Declare Function NewArray Lib "Foundation" Selector "new" (cls As Ptr) As Ptr
+    Private Declare Sub AddObject Lib "Foundation" Selector "addObject:" (nativeArray As Ptr, value As Ptr)
+    Private Function KeyObject(name As String) As Ptr
+        Dim address As Ptr = FindSymbol(CType(-2, Ptr), name)
+        If address = Nil Then Throw New UnsupportedOperationException("File resource key is unavailable: " + name)
+        Dim key As Ptr = Nil
+        CopyPointer(key, address, 8)
+        Return key
+    End Function
+    Private Function MakeFileURL(file As FileSystemItem) As Ptr
+        If file = Nil Then Throw New InvalidArgumentException("A file is required")
+        ValidateText(file.NativePath, "File path")
+        If Not file.Exists() Then Throw New InvalidArgumentException("The file does not exist")
+        Dim text As CFStringRef = CType(file.NativePath, CFStringRef)
+        Try
+            Return FileURL(Allocate(NativeClass("NSURL")), text)
+        Finally
+            ReleaseObject(text)
+        End Try
+    End Function
+    Private Function ResourceValue(url As Ptr, key As String) As Ptr
+        Dim value As Ptr = Nil
+        Dim errorObject As Ptr = Nil
+        If ReadResource(url, value, KeyObject(key), errorObject) = 0 Then Throw New Exception("Cannot read file resource: " + key)
+        Return value
+    End Function
+#End If
+
+Private Sub ValidateText(value As String, label As String)
+    If String.Trim(value) = "" Then Throw New InvalidArgumentException(label + " is required")
+    For Each character As String In String.Chars(value)
+        If String.Asc(character) = 0 Then Throw New InvalidArgumentException(label + " contains NUL")
+    Next
+End Sub
+
+''' Linux and Windows native failure. Domain is "errno" (Linux), "Win32"
+''' (GetLastError) or "buoy-filemetadata" for conditions this package detects:
+''' 1 = tag attribute contains a NUL byte, 2 = tag attribute or resolved name
+''' is not valid UTF-8, 3 = native file name is not valid UTF-16.
+''' NativeCode equals ErrorCode. Messages never include paths or tag text.
+''' The macOS backend keeps throwing its original Exception messages.
+Public Class FileMetadataException Inherits Exception
+    Private Property mOperation As String = ""
+    Public Property Operation As String
+        Get
+            Return Me.mOperation
+        End Get
+    End Property
+    Private Property mDomain As String = ""
+    Public Property Domain As String
+        Get
+            Return Me.mDomain
+        End Get
+    End Property
+    Private Property mNativeCode As Integer = 0
+    Public Property NativeCode As Integer
+        Get
+            Return Me.mNativeCode
+        End Get
+    End Property
+    Public Sub Constructor(message As String, nativeOperation As String, nativeDomain As String, code As Integer)
+        Super.Constructor(message + " (" + nativeOperation + ", " + nativeDomain + " " + Str(code) + ")", code)
+        Me.mOperation = nativeOperation
+        Me.mDomain = nativeDomain
+        Me.mNativeCode = code
+    End Sub
+End Class
+
+#If TargetLinux Or TargetWindows Then
+    ' Native lookups preserve permission errors rather than treating every
+    ' failed Boolean existence probe as an absent file.
+    Private Function RequireLocalPath(file As FileSystemItem) As String
+        If file = Nil Then Throw New InvalidArgumentException("A file is required")
+        ValidateText(file.NativePath, "File path")
+        #If TargetLinux Then
+            Dim taggable As Boolean = False
+            Dim code As Integer = FileMetadataBackend.FileMetadataLinuxEntryKind(file.NativePath, taggable)
+            If code = 2 Then Throw New InvalidArgumentException("The file does not exist")
+            If code <> 0 Then Throw New FileMetadataException("Cannot inspect the file", "statx", "errno", code)
+        #End If
+        Return file.NativePath
+    End Function
+#End If
+
+#If TargetLinux Then
+    ' Linux errno values shared by the x86_64 and aarch64 (asm-generic) ABIs.
+    Const LinuxNoAttribute As Integer = 61
+    Const LinuxNotSupported As Integer = 95
+    ' VFS XATTR_SIZE_MAX for one attribute value.
+    Const LinuxTagBytesLimit As Integer = 65536
+
+    Private Function LinuxDecode(raw As Bytes, operation As String) As String
+        For i As Integer = 0 To raw.Count - 1
+            If raw.Item(i) = 0 Then Throw New FileMetadataException("Native text contains NUL", operation, "buoy-filemetadata", 1)
+        Next
+        Try
+            Return raw.ToString(Text.Encodings.UTF8)
+        Catch e As EncodingException
+            Throw New FileMetadataException("Native text is not valid UTF-8", operation, "buoy-filemetadata", 2)
+        End Try
+    End Function
+
+    Private Function LinuxLastComponent(entryPath As String) As String
+        Dim trimmed As String = entryPath
+        While String.Len(trimmed) > 1 And String.Right(trimmed, 1) = "/"
+            trimmed = String.Left(trimmed, String.Len(trimmed) - 1)
+        Wend
+        If trimmed = "/" Then Return "/"
+        Dim parts As Array Of String = String.Split(trimmed, "/")
+        Return parts(Array.Count(parts) - 1)
+    End Function
+
+    ' The directory entry name. "." and ".." have no name of their own, so
+    ' they are resolved with realpath(3); every other name is used verbatim.
+    Private Function LinuxEntryName(entryPath As String) As String
+        Dim name As String = LinuxLastComponent(entryPath)
+        If name <> "." And name <> ".." Then Return name
+        Dim resolved As New Bytes()
+        Dim code As Integer = FileMetadataBackend.FileMetadataLinuxRealPath(entryPath, resolved)
+        If code <> 0 Then Throw New FileMetadataException("Cannot resolve the directory name", "realpath", "errno", code)
+        Return LinuxLastComponent(LinuxDecode(resolved, "realpath"))
+    End Function
+
+    ' Comma-separated UTF-8, the KDE KFileMetaData user.xdg.tags format.
+    ' Empty segments are skipped; every other segment is kept verbatim.
+    Private Function LinuxParseTags(raw As Bytes) As Array Of String
+        Dim outputValue As Array Of String = []
+        If raw.Count = 0 Then Return outputValue
+        For Each part As String In String.Split(LinuxDecode(raw, "getxattr user.xdg.tags"), ",")
+            If part <> "" Then Array.Append(outputValue, part)
+        Next
+        Return outputValue
+    End Function
+#End If
+
+#If TargetWindows Then
+    Const WindowsHiddenAttribute As Integer = 2
+
+    ' ERROR_FILE_NOT_FOUND and ERROR_PATH_NOT_FOUND keep the macOS absent-file
+    ' contract; every other code is a native failure.
+    Private Function WindowsLookupFailure(message As String, operation As String, code As Integer) As Exception
+        If code = 2 Or code = 3 Then Return New InvalidArgumentException("The file does not exist")
+        Return New FileMetadataException(message, operation, "Win32", code)
+    End Function
+
+    Private Function WindowsWithoutPrefix(entryPath As String) As String
+        If String.Left(entryPath, 4) = "\\\\?\\" Or String.Left(entryPath, 4) = "\\\\.\\" Then Return String.Mid(entryPath, 5)
+        Return entryPath
+    End Function
+
+    ' Drive roots and \\server\share roots have no directory entry of their own.
+    Private Function WindowsIsRoot(fullPath As String) As Boolean
+        Dim value As String = WindowsWithoutPrefix(fullPath)
+        If String.Left(value, 4) = "UNC\\" Then value = "\\\\" + String.Mid(value, 5)
+        If String.Len(value) <= 3 And String.Mid(value, 2, 1) = ":" Then
+            Return String.Len(value) = 2 Or String.Right(value, 1) = "\\"
+        End If
+        If String.Left(value, 2) <> "\\\\" Then Return False
+        Dim count As Integer = 0
+        For Each part As String In String.Split(String.Mid(value, 3), "\\")
+            If part <> "" Then count += 1
+        Next
+        Return count <= 2
+    End Function
+#End If
+
+Public Class FileMetadataSnapshot
+    Private Property mDisplayName As String = ""
+    Public Property DisplayName As String
+        Get
+            Return Me.mDisplayName
+        End Get
+    End Property
+    Private Property mTags As Array Of String = []
+    Public Property Tags As Array Of String
+        Get
+            Return Array.Clone(Me.mTags)
+        End Get
+    End Property
+    Private Property mIsHidden As Boolean = False
+    Public Property IsHidden As Boolean
+        Get
+            Return Me.mIsHidden
+        End Get
+    End Property
+    Private Property mIsPackage As Boolean = False
+    Public Property IsPackage As Boolean
+        Get
+            Return Me.mIsPackage
+        End Get
+    End Property
+    Private Property mIsApplication As Boolean = False
+    Public Property IsApplication As Boolean
+        Get
+            Return Me.mIsApplication
+        End Get
+    End Property
+    Private Property mExcludedFromBackup As Boolean = False
+    Public Property ExcludedFromBackup As Boolean
+        Get
+            Return Me.mExcludedFromBackup
+        End Get
+    End Property
+    Private Property mHasTags As Boolean = False
+    ''' True when Tags was read from a native tag store: always on macOS; on
+    ''' Linux when the entry (after following links) is a regular file or
+    ''' directory on a filesystem with user extended attributes. Always False
+    ''' on Windows. When False, Tags is an empty sentinel, not an observed list.
+    Public Property HasTags As Boolean
+        Get
+            #If TargetMac Then
+                Return True
+            #Else
+                Return Me.mHasTags
+            #End If
+        End Get
+    End Property
+    ''' True only on macOS. Elsewhere IsPackage is a False sentinel.
+    Public Property HasPackageStatus As Boolean
+        Get
+            #If TargetMac Then
+                Return True
+            #Else
+                Return False
+            #End If
+        End Get
+    End Property
+    ''' True only on macOS. Elsewhere IsApplication is a False sentinel.
+    Public Property HasApplicationStatus As Boolean
+        Get
+            #If TargetMac Then
+                Return True
+            #Else
+                Return False
+            #End If
+        End Get
+    End Property
+    ''' True only on macOS. Elsewhere ExcludedFromBackup is a False sentinel.
+    Public Property HasBackupExclusion As Boolean
+        Get
+            #If TargetMac Then
+                Return True
+            #Else
+                Return False
+            #End If
+        End Get
+    End Property
+    Public Sub Constructor(file As FileSystemItem)
+        #If TargetMac Then
+            Dim pool As Ptr = NewPool(NativeClass("NSAutoreleasePool"))
+            Dim url As Ptr = Nil
+            Try
+                url = MakeFileURL(file)
+                Me.mDisplayName = NativeText(ResourceValue(url, "NSURLLocalizedNameKey"))
+                Me.mTags = CopyStrings(ResourceValue(url, "NSURLTagNamesKey"))
+                Me.mIsHidden = NumberFlag(ResourceValue(url, "NSURLIsHiddenKey")) <> 0
+                Me.mIsPackage = NumberFlag(ResourceValue(url, "NSURLIsPackageKey")) <> 0
+                Me.mIsApplication = NumberFlag(ResourceValue(url, "NSURLIsApplicationKey")) <> 0
+                Me.mExcludedFromBackup = NumberFlag(ResourceValue(url, "NSURLIsExcludedFromBackupKey")) <> 0
+            Finally
+                If url <> Nil Then ReleaseObject(url)
+                DrainPool(pool)
+            End Try
+        #ElseIf TargetLinux Then
+            Dim entryPath As String = RequireLocalPath(file)
+            Me.mDisplayName = LinuxEntryName(entryPath)
+            Me.mIsHidden = Me.mDisplayName <> "/" And String.Left(Me.mDisplayName, 1) = "."
+            Dim taggable As Boolean = False
+            Dim code As Integer = FileMetadataBackend.FileMetadataLinuxEntryKind(entryPath, taggable)
+            If code <> 0 Then Throw New FileMetadataException("Cannot read the file type", "statx", "errno", code)
+            If taggable Then
+                Dim raw As New Bytes()
+                code = FileMetadataBackend.FileMetadataLinuxReadTags(entryPath, raw)
+                If code = 0 Then
+                    Me.mTags = LinuxParseTags(raw)
+                    Me.mHasTags = True
+                ElseIf code = LinuxNoAttribute Then
+                    Me.mHasTags = True
+                ElseIf code <> LinuxNotSupported Then
+                    Throw New FileMetadataException("Cannot read file tags", "getxattr user.xdg.tags", "errno", code)
+                End If
+            End If
+        #ElseIf TargetWindows Then
+            Dim entryPath As String = RequireLocalPath(file)
+            Dim pattern As String = WindowsWithoutPrefix(entryPath)
+            If String.Contains(pattern, "*") Or String.Contains(pattern, "?") Then Throw New InvalidArgumentException("File path contains a wildcard")
+            Dim fullPath As String = ""
+            Dim attributes As Integer = 0
+            Try
+                Dim code As Integer = FileMetadataBackend.FileMetadataWindowsFullPath(entryPath, fullPath)
+                If code <> 0 Then Throw New FileMetadataException("Cannot resolve the file path", "GetFullPathNameW", "Win32", code)
+                If WindowsIsRoot(fullPath) Then
+                    code = FileMetadataBackend.FileMetadataWindowsAttributes(fullPath, attributes)
+                    If code <> 0 Then Throw WindowsLookupFailure("Cannot read file attributes", "GetFileAttributesW", code)
+                    Me.mDisplayName = fullPath
+                Else
+                    While String.Right(fullPath, 1) = "\\" Or String.Right(fullPath, 1) = "/"
+                        fullPath = String.Left(fullPath, String.Len(fullPath) - 1)
+                    Wend
+                    Dim entryName As String = ""
+                    code = FileMetadataBackend.FileMetadataWindowsEntry(fullPath, entryName, attributes)
+                    If code <> 0 Then Throw WindowsLookupFailure("Cannot read the directory entry", "FindFirstFileW", code)
+                    Me.mDisplayName = entryName
+                End If
+            Catch e As EncodingException
+                Throw New FileMetadataException("Native file name is not valid UTF-16", "UTF-16 decode", "buoy-filemetadata", 3)
+            End Try
+            Me.mIsHidden = (attributes And WindowsHiddenAttribute) <> 0
+        #Else
+            Throw New UnsupportedOperationException("File metadata requires macOS, Linux or Windows")
+        #End If
+    End Sub
+End Class
+
+Public Sub SetFileTags(file As FileSystemItem, tags As Array Of String)
+    For Each tag As String In tags
+        ValidateText(tag, "Tag")
+    Next
+    #If TargetMac Then
+        Dim pool As Ptr = NewPool(NativeClass("NSAutoreleasePool"))
+        Dim url As Ptr = Nil
+        Dim values As Ptr = Nil
+        Try
+            url = MakeFileURL(file)
+            values = NewArray(NativeClass("NSMutableArray"))
+            For Each tag As String In tags
+                Dim text As CFStringRef = CType(tag, CFStringRef)
+                AddObject(values, text)
+                ReleaseObject(text)
+            Next
+            Dim errorObject As Ptr = Nil
+            If SetResource(url, values, KeyObject("NSURLTagNamesKey"), errorObject) = 0 Then Throw New Exception("Finder tags could not be saved")
+        Finally
+            If values <> Nil Then ReleaseObject(values)
+            If url <> Nil Then ReleaseObject(url)
+            DrainPool(pool)
+        End Try
+    #ElseIf TargetLinux Then
+        ' All input validation precedes any native call, so a rejected list
+        ' never changes the existing attribute.
+        For Each tag As String In tags
+            If String.Contains(tag, ",") Then Throw New InvalidArgumentException("Tag contains a comma, which user.xdg.tags cannot represent")
+        Next
+        Dim value As Bytes = Bytes.FromString(String.Join(tags, ","), Text.Encodings.UTF8)
+        If value.Count > LinuxTagBytesLimit Then Throw New InvalidArgumentException("Tags exceed the 65536-byte extended attribute limit")
+        Dim entryPath As String = RequireLocalPath(file)
+        Dim code As Integer = 0
+        If Array.Count(tags) = 0 Then
+            code = FileMetadataBackend.FileMetadataLinuxRemoveTags(entryPath)
+            If code <> 0 And code <> LinuxNoAttribute Then Throw New FileMetadataException("File tags could not be cleared", "removexattr user.xdg.tags", "errno", code)
+        Else
+            code = FileMetadataBackend.FileMetadataLinuxWriteTags(entryPath, value)
+            If code <> 0 Then Throw New FileMetadataException("File tags could not be saved", "setxattr user.xdg.tags", "errno", code)
+        End If
+    #Else
+        Throw New UnsupportedOperationException("File tags require macOS or Linux; Windows has no tag store")
+    #End If
+End Sub

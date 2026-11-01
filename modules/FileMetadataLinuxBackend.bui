@@ -1,0 +1,91 @@
+' Internal Linux/glibc backend for FileMetadata.bui (x64/ARM64).
+' Imported only by FileMetadata.bui under #If TargetLinux; not public API.
+' Every function returns 0 or the raw errno of the failing call. The facade
+' classifies codes and throws FileMetadataException; nothing here retries.
+' Only the user.xdg.tags extended attribute is read or written. File contents
+' are never opened and no other attribute is touched.
+
+#If TargetLinux Then
+Private Declare Function FMLCalloc Lib "c" Alias "calloc" (count As Integer, size As Integer) As Ptr
+Private Declare Sub FMLFree Lib "c" Alias "free" (memory As Ptr)
+Private Declare Function FMLLength Lib "c" Alias "strlen" (text As Ptr) As Integer
+Private Declare Function FMLErrnoPointer Lib "c" Alias "__errno_location" () As Ptr
+Private Declare Function FMLCopyError Lib "c" Alias "memcpy" (ByRef value As Int32, source As Ptr, count As Integer) As Ptr
+' Path-based calls follow symbolic links, matching KDE KFileMetaData.
+Private Optional Declare Function FMLGetAttribute Lib "c" Alias "getxattr" (entryPath As String, attributeName As String, value As Ptr, size As Integer) As Integer
+Private Optional Declare Function FMLSetAttribute Lib "c" Alias "setxattr" (entryPath As String, attributeName As String, value As Ptr, size As Integer, nativeOptions As Int32) As Int32
+Private Optional Declare Function FMLRemoveAttribute Lib "c" Alias "removexattr" (entryPath As String, attributeName As String) As Int32
+Private Optional Declare Function FMLStatx Lib "c" Alias "statx" (directory As Int32, entryPath As String, nativeOptions As Int32, mask As UInt32, buffer As Ptr) As Int32
+Private Optional Declare Function FMLRealPath Lib "c" Alias "realpath" (input As String, output As Ptr) As Ptr
+
+Const FMLAttributeName As String = "user.xdg.tags"
+' VFS XATTR_SIZE_MAX: no Linux filesystem returns a larger value through getxattr.
+Const FMLValueLimit As Integer = 65536
+
+Private Function FMLErrno() As Integer
+    Dim code As Int32 = 0
+    FMLCopyError(code, FMLErrnoPointer(), 4)
+    If code = 0 Then Return -1
+    Return code
+End Function
+
+''' Classify the entry after following links with statx(STATX_TYPE).
+''' taggable = True only for regular files and directories, the only kinds
+''' that may carry user.* attributes (xattr(7)). Read-only.
+Public Function FileMetadataLinuxEntryKind(entryPath As String, ByRef taggable As Boolean) As Integer
+    Dim buffer As New Bytes(256)
+    For i As Integer = 1 To 256
+        buffer.Append(0)
+    Next
+    ' AT_FDCWD, no AT_SYMLINK_NOFOLLOW, STATX_TYPE.
+    If FMLStatx(-100, entryPath, 0, 1, buffer.DataPtr()) <> 0 Then Return FMLErrno()
+    ' struct statx: stx_mode is a little-endian __u16 at byte 28 on every Linux ABI.
+    Dim kind As Integer = (buffer.Item(28) + buffer.Item(29) * 256) And 61440
+    taggable = kind = 32768 Or kind = 16384
+    Return 0
+End Function
+
+''' Copy the raw user.xdg.tags bytes into value. A single getxattr call into a
+''' VFS-maximum buffer avoids the size-then-read race. Read-only.
+Public Function FileMetadataLinuxReadTags(entryPath As String, value As Bytes) As Integer
+    Dim buffer As Ptr = FMLCalloc(1, FMLValueLimit)
+    If buffer = Nil Then Throw New RuntimeException("Unable to allocate file tag buffer")
+    Try
+        Dim count As Integer = FMLGetAttribute(entryPath, FMLAttributeName, buffer, FMLValueLimit)
+        If count < 0 Then Return FMLErrno()
+        If count > FMLValueLimit Then Return 34
+        If count > 0 Then value.Append(buffer, count)
+        Return 0
+    Finally
+        FMLFree(buffer)
+    End Try
+End Function
+
+''' Create or atomically replace user.xdg.tags with a non-empty value.
+''' Writes user data.
+Public Function FileMetadataLinuxWriteTags(entryPath As String, value As Bytes) As Integer
+    If value.Count = 0 Or value.Count > FMLValueLimit Then Return 22
+    If FMLSetAttribute(entryPath, FMLAttributeName, value.DataPtr(), value.Count, 0) <> 0 Then Return FMLErrno()
+    Return 0
+End Function
+
+''' Remove user.xdg.tags. Returns the raw errno, including ENODATA when the
+''' attribute was already absent. Writes user data.
+Public Function FileMetadataLinuxRemoveTags(entryPath As String) As Integer
+    If FMLRemoveAttribute(entryPath, FMLAttributeName) <> 0 Then Return FMLErrno()
+    Return 0
+End Function
+
+''' realpath(3) bytes for an existing path; used only to name "." and "..".
+''' Read-only.
+Public Function FileMetadataLinuxRealPath(entryPath As String, resolved As Bytes) As Integer
+    Dim output As Ptr = FMLRealPath(entryPath, Nil)
+    If output = Nil Then Return FMLErrno()
+    Try
+        resolved.Append(output, FMLLength(output))
+        Return 0
+    Finally
+        FMLFree(output)
+    End Try
+End Function
+#End If

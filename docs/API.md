@@ -36,9 +36,3 @@ The format follows KDE KFileMetaData, the main `user.xdg.tags` implementation: U
 ## Windows
 
 Windows has no tag store in this package. `SetFileTags` validates tag text first (existing order) and then always throws `UnsupportedOperationException`, including for an empty list, so tags are never silently dropped. The snapshot never opens the file: a junction or symbolic link reports its own entry (even when its target is missing), and paths are made absolute lexically (`GetFullPathNameW`). Wildcards (`*`, `?`) throw `InvalidArgumentException`. A missing file (`ERROR_FILE_NOT_FOUND`/`ERROR_PATH_NOT_FOUND`) throws `InvalidArgumentException`. Other failures throw `FileMetadataException` with `Domain = "Win32"`, or `buoy-filemetadata` code 3 for a name that is not valid UTF-16. Existence comes from the native lookup, not `FileSystemItem.Exists`, because in Buoy 0.72 `Exists` misses Unicode names on Windows.
-
-## Validation
-
-
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-

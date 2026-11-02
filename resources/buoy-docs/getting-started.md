@@ -11,13 +11,13 @@ related: ["index.md", "api.md", "typed-api.md"]
 
 ## Install and import
 
-Copy the sealed `filemetadata-0.1.0.buipkg` archive into your application's `packages/` folder. To build it from this repository, run `python3 tools/build_integrations.py filemetadata`.
+Copy the sealed `filemetadata-0.1.0.buipkg` archive into your application's `packages/` folder.
 
 ## First use
 
 Construct `FileMetadataSnapshot` with an accessible local file or directory. The `Tags` getter returns a copy, so changing the returned array changes neither the snapshot nor the file. To change tags, call `SetFileTags` deliberately with the complete replacement list; an empty array clears them.
 
-```buoy
+```basic
 Import filemetadata
 
 Sub Main()

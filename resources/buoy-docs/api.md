@@ -46,5 +46,4 @@ Invalid input throws `InvalidArgumentException`: a Nil or missing file, a blank 
 - [Getting started](getting-started.md)
 - [API reference](api.md)
 
-
 [Full typed API: properties, parameters, defaults, and returns](typed-api.md)

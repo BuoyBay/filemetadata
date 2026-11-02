@@ -13,8 +13,6 @@ related: ["api.md", "getting-started.md", "index.md"]
 
 Generated from the package source declarations. Platform guards are shown where present; inherited members are documented on the base type. See the [API contracts](api.md) for behavior and limitations.
 
-## FileMetadata functions
-
 ### FileMetadataSupported
 
 `Public Function FileMetadataSupported() As Boolean`
@@ -130,8 +128,6 @@ Returns: no value.
 
 Returns: no value.
 
-## FileMetadataLinuxBackend functions
-
 ### FileMetadataLinuxEntryKind
 
 `Public Function FileMetadataLinuxEntryKind(entryPath As String, ByRef taggable As Boolean) As Integer`
@@ -235,8 +231,6 @@ Availability: `#If TargetLinux Then`
 | Type |
 | --- |
 | `Integer` |
-
-## FileMetadataWindowsBackend functions
 
 ### FileMetadataWindowsFullPath
 

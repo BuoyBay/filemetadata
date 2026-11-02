@@ -1,4 +1,4 @@
-# Read and update Finder tags and native file metadata
+# Finder tags and native file metadata
 
 `Import filemetadata`. `New FileMetadataSnapshot(file)` reads `DisplayName`, `Tags`, `IsHidden`, `IsPackage`, `IsApplication`, and `ExcludedFromBackup`. `SetFileTags(file, tags)` explicitly replaces the file's tags; an empty array clears them. Reading a snapshot never changes metadata and never reads file contents. Access errors throw.
 

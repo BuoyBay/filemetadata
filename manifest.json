@@ -1,14 +1,14 @@
 {
-  "schema": 1,
-  "name": "filemetadata",
-  "version": "0.1.0",
-  "description": "Read and update Finder tags and native file metadata",
-  "platforms": [
-    "arm64-apple-macos",
-    "x86_64-apple-macos",
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-pc-windows-msvc",
-    "arm64-pc-windows-msvc"
-  ]
+    "schema": 1,
+    "name": "filemetadata",
+    "version": "0.1.0",
+    "description": "Finder tags and native file metadata",
+    "platforms": [
+        "arm64-apple-macos",
+        "x86_64-apple-macos",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "arm64-pc-windows-msvc"
+    ]
 }

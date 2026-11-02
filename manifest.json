@@ -2,7 +2,7 @@
     "schema": 1,
     "name": "filemetadata",
     "version": "0.1.0",
-    "description": "Finder tags and native file metadata",
+    "description": "Finder tags and file metadata",
     "platforms": [
         "arm64-apple-macos",
         "x86_64-apple-macos",
